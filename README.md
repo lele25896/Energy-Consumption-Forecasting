@@ -133,9 +133,3 @@ python -m streamlit run app.py
 ```
 
 Then open [http://localhost:8501](http://localhost:8501).
-
-## References
-
-- Nie et al. (2023) — *A Time Series is Worth 64 Words: Long-term Forecasting with Transformers* (PatchTST)
-- Zeng et al. (2022) — *Are Transformers Effective for Time Series Forecasting?* (DLinear)
-- Taylor & Letham (2018) — *Forecasting at Scale* (Prophet)
