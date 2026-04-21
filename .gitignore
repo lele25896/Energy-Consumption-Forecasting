@@ -1,0 +1,11 @@
+# Data — download separately from Kaggle
+*.csv
+*.parquet
+
+# Notebooks
+.ipynb_checkpoints/
+
+# Python
+__pycache__/
+*.pyc
+.env
