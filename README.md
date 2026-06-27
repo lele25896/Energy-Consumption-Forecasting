@@ -1,17 +1,35 @@
 # Energy Consumption Forecasting
 
 Hourly electricity demand forecasting on the AEP dataset (~121k hours, 2004–2018).
-Compares four approaches — from classical decomposition to Transformer-based models —
-and includes an interactive Streamlit dashboard.
+Compares four approaches — from classical decomposition to a Transformer — using a
+fully **autoregressive 672-hour rollout** evaluation and an interactive Streamlit dashboard.
 
 ## Results
+
+Evaluation uses a **single-pass autoregressive rollout** on the held-out last 4 weeks (672 h):
+each model predicts one step ahead using only its own prior predictions, no re-anchoring on real data.
 
 | Model | MAE (MW) | MAPE |
 |-------|----------|------|
 | Prophet | 1535.93 | 10.33% |
-| XGBoost + lag features | 133.58 | 0.85% |
-| **LSTM + cyclic features** | **94.35** | **0.61%** |
+| **XGBoost + lag features** | **983.25** | **6.40%** |
+| LSTM + cyclic + scheduled sampling | 2154.65 | 14.02% |
+| PatchTST | 2399.23 | 15.95% |
+
+<details>
+<summary>Teacher-forced reference numbers (one-step-ahead, non-production)</summary>
+
+| Model | MAE (MW) | MAPE |
+|-------|----------|------|
+| Prophet | 1535.93 | 10.33% |
+| XGBoost | 133.58 | 0.85% |
+| LSTM | 94.35 | 0.61% |
 | PatchTST | 141.22 | 0.94% |
+
+Teacher-forced evaluation uses the real energy history at every step — it measures
+one-step-ahead nowcasting accuracy, not multi-step forecasting ability.
+
+</details>
 
 ![Forecast comparison — last 2 weeks of test set](forecast_comparison.png)
 
@@ -19,40 +37,59 @@ and includes an interactive Streamlit dashboard.
 
 **Prophet** — additive decomposition (trend + daily/weekly/yearly seasonality).
 No memory of the immediate past; treats the series as a sum of smooth components.
+Provides 80% confidence intervals out of the box.
+Immune to autoregressive error accumulation because it predicts the full horizon at once.
 
-**XGBoost** — gradient boosted trees on handcrafted lag features (1h, 24h, 48h, 168h),
-rolling statistics, and calendar features. Early stopping uses a held-out validation
-split from within the training set to avoid data leakage.
+**XGBoost** — gradient boosted trees on handcrafted lag features (1 h, 24 h, 48 h, 168 h),
+rolling statistics, and calendar features. Early stopping on an inner validation split
+(last 2 weeks of train) — the test set is never seen during fitting.
 
 ![XGBoost feature importance](feature_importance.png)
 
-**LSTM** — two-layer LSTM with 8 input features: energy (scaled) + cyclic encodings
-of hour, day-of-week, and month (sin/cos pairs) + is_weekend flag.
-Cyclic encoding preserves circularity (hour 23 ≈ hour 0).
+**LSTM** — two-layer LSTM (hidden=64, ~80k params) with 8 input features: scaled energy +
+cyclic sin/cos encodings of hour, day-of-week, and month + is_weekend flag.
+Trained with **scheduled sampling** (ss_prob 0 → 0.5 over 40 epochs) to reduce exposure bias.
 
-**PatchTST** — Transformer encoder on non-overlapping patches of the time series
-(patch_len=16, stride=8 → 20 patch tokens). Pre-LayerNorm architecture,
-learnable positional embeddings. Reduces attention complexity from O(L²) to O(P²).
+**PatchTST** — Transformer encoder on overlapping patches (patch_len=16, stride=8 → 20 tokens,
+~419k params). Pre-LayerNorm, learnable positional embeddings.
+Reduces attention complexity from O(L²) to O(P²) — 70× fewer ops vs raw attention at L=168.
 
-## Discussion: why LSTM beats PatchTST here
+## Discussion
 
-The AEP series is dominated by **short-term autocorrelation**: the single best
-predictor is the value one hour ago (lag_1), followed by lag_24 (same hour yesterday).
-Electricity demand ramps up and down gradually with very little long-range dependency
-beyond daily/weekly cycles.
+### The ranking inverts under autoregressive evaluation
 
-LSTM's sequential inductive bias is well suited for this: it maintains a hidden state
-that implicitly tracks the immediate past, giving lag_1 and lag_24 strong implicit weight
-at every step.
+Teacher-forced evaluation flatters sequence models: every prediction sees the real energy history,
+so even a model that accumulates errors under rollout will score well. Under true multi-step
+rollout the picture changes completely.
 
-PatchTST groups 16 consecutive hours into a single patch token. This aggregation
-**dilutes the lag_1 signal** — the most recent hour is merged with the preceding 15.
-The model must recover fine-grained recent information from a coarser representation,
-an avoidable handicap on a dataset where recency dominates.
+**XGBoost wins the autoregressive evaluation** because its explicit lag_24 and lag_168 features
+use real historical values for the first 24–168 steps, anchoring the rollout before the window
+fills with predictions. GBTs are also less sensitive to small input perturbations by construction.
 
-This result echoes **Zeng et al. (2022)** (*Are Transformers Effective for Time Series
-Forecasting?*), which showed that on standard benchmarks a simple linear model can
-outperform Transformer-based methods when the dominant pattern is a local linear trend.
+**LSTM collapses without scheduled sampling** (MAE 4132 MW, MAPE 27%) due to **exposure bias**:
+trained exclusively on real inputs (teacher forcing), it was never hardened against its own
+prediction errors. After 168 autoregressive steps the entire lookback window is synthetic —
+the model is in full distribution shift.
+
+**Scheduled sampling halves LSTM error** (4132 → 2154 MW): during training, inputs are
+gradually replaced with the model's own predictions (ss_prob 0 → 0.5 after a 5-epoch warmup),
+forcing the model to learn to recover from its own mistakes. LSTM with SS now matches PatchTST.
+
+**PatchTST degrades but survives** without any explicit fix, likely because attention diffuses
+accumulated errors across the patch window rather than piping them directly through hidden state.
+
+### Why LSTM beats PatchTST in teacher-forced evaluation
+
+The AEP series is dominated by **short-term autocorrelation**: the single best predictor
+is the value one hour ago (lag_1), followed by lag_24 (same hour yesterday).
+
+LSTM's sequential inductive bias is well-suited: its hidden state implicitly tracks the
+immediate past, giving lag_1/lag_24 strong weight at every step.
+
+PatchTST groups 16 consecutive hours into one patch token, **diluting the lag_1 signal**.
+The most recent hour is merged with the preceding 15; the model must reconstruct fine-grained
+recency from a coarser representation. Echoes **Zeng et al. 2022** (*Are Transformers
+Effective for Time Series Forecasting?*).
 
 ### Computational complexity
 
@@ -62,47 +99,31 @@ outperform Transformer-based methods when the dominant pattern is a local linear
 | Transformer (raw) | O(L² · d) | O(L²) | ✅ Parallel |
 | PatchTST | O(P² · d) | O(P²) | ✅ Parallel |
 
-L = sequence length, d = hidden size, P = number of patches (P ≪ L)
-
-The **patching trick** reduces attention from O(L²) to O(P²) = O((L/p)²).
-With patch_len=16 and L=168: raw attention needs 168² = 28,224 ops;
-PatchTST needs only 20² = 400 — a 70× reduction.
-
-Despite full GPU parallelism, PatchTST's larger parameter count (~330k vs ~80k)
-and 50 epochs (vs 30 for LSTM) make total training time roughly 3× longer.
+L = sequence length, d = hidden size, P = number of patches (P ≪ L).
 
 ### When Transformers are the right choice
 
-PatchTST and Transformer-based models outperform LSTMs when the signal is
-**non-local** or **multi-source**:
+1. **Long-range dependencies** — forecasting 30 days ahead, where today relates to the
+   same weekday last month. Self-attention connects tokens 720 steps apart directly; LSTM
+   gradients vanish over that distance.
+2. **Multivariate cross-series interactions** — 50 substations with load-shifting; attention
+   captures pairwise relationships across all series in one operation.
+3. **Large-scale pretraining** — foundation models (TimesFM, Chronos) pretrained on millions
+   of diverse series outperform task-specific LSTMs when labeled data is scarce.
 
-1. **Long-range dependencies** — predicting demand 30 days ahead, where today's
-   pattern must relate to the same weekday last month. Self-attention connects tokens
-   720 steps apart directly; LSTM gradients vanish over that distance despite gating.
-
-2. **Multivariate cross-series interactions** — forecasting 50 substations
-   simultaneously, where load-shifting between areas creates non-local dependencies.
-   Attention captures pairwise relationships across all series in one operation.
-
-3. **Large-scale pretraining** — foundation models such as TimesFM (Google, 2024)
-   and Chronos (Amazon, 2024) use Transformer backbones pretrained on millions of
-   diverse series. Fine-tuned, they outperform task-specific LSTMs when labeled data
-   is scarce.
-
-**Rule of thumb**: if lag_1 and lag_24 explain most of the variance, use LSTM or
-XGBoost with lag features. Reach for Transformers when the predictive signal lives
-in patterns too long or too diffuse for a sequential model to capture.
+**Rule of thumb**: if lag_1 and lag_24 explain most variance → XGBoost or LSTM with
+scheduled sampling. Reach for Transformers when the predictive signal is long or diffuse.
 
 ## Project structure
 
 ```
 energy_forecasting.ipynb   # training, evaluation, and model comparison
-app.py                     # Streamlit dashboard
-AEP_hourly.csv             # raw data (download from Kaggle, see below)
-lstm_forecaster.pt         # saved LSTM weights
-patchtst_forecaster.pt     # saved PatchTST weights
-xgb_forecaster.pkl         # saved XGBoost model
+app.py                     # Streamlit dashboard (autoregressive inference)
+lstm_forecaster.pt         # LSTM weights (trained with scheduled sampling)
+patchtst_forecaster.pt     # PatchTST weights
+xgb_forecaster.pkl         # XGBoost model
 energy_scaler.pkl          # StandardScaler for the energy column
+AEP_hourly.csv             # raw data (download from Kaggle, not in repo)
 ```
 
 ## Dataset
@@ -128,8 +149,7 @@ Trained models are saved automatically at the end.
 **Dashboard** — after running the notebook at least once:
 
 ```bash
-conda activate torch_env
-python -m streamlit run app.py
+streamlit run app.py
 ```
 
 Then open [http://localhost:8501](http://localhost:8501).

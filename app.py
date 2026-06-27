@@ -110,39 +110,45 @@ def load_models():
     return scaler, xgb, lstm, patchtst
 
 # ── Inference helpers ─────────────────────────────────────────────────────────
+# ponytail: serial forward passes — can't batch, each step's energy feeds the next window
 def run_seq_model(model, scaler, train, test):
     seq_len = getattr(model, '_seq_len', SEQ_LEN)
-
-    train_f = build_cyclic_features(train).copy()
-    test_f  = build_cyclic_features(test).copy()
-    train_f['energy'] = scaler.transform(train_f[['energy']])
-    test_f['energy']  = scaler.transform(test_f[['energy']])
-
-    train_arr = train_f.values.astype(np.float32)
-    test_arr  = test_f.values.astype(np.float32)
-    full      = np.concatenate([train_arr[-seq_len:], test_arr])
-
-    n       = len(test_arr)
-    windows = np.stack([full[i:i + seq_len] for i in range(n)])
-    tensor  = torch.tensor(windows, dtype=torch.float32)
-
-    preds = []
+    full = build_cyclic_features(pd.concat([train, test]))
+    full['energy'] = scaler.transform(full[['energy']])
+    arr = full.values.astype(np.float32)   # col 0 = scaled energy
+    origin = len(train)
+    model.eval()
     with torch.no_grad():
-        for i in range(0, n, 128):
-            preds.append(model(tensor[i:i + 128].to(DEVICE)).cpu().numpy())
-
-    return scaler.inverse_transform(np.concatenate(preds).reshape(-1, 1)).flatten()
+        for t in range(origin, len(arr)):
+            w = torch.tensor(arr[t - seq_len:t][None], dtype=torch.float32).to(DEVICE)
+            arr[t, 0] = model(w).item()
+    return scaler.inverse_transform(arr[origin:, 0:1]).flatten()
 
 def run_xgb(model, train, test):
-    df_all  = pd.concat([train, test])
-    df_feat = make_xgb_features(df_all).dropna()
-    feat_cols = [c for c in df_feat.columns if c != 'energy']
-    return model.predict(df_feat[feat_cols].iloc[-len(test):])
+    feat_cols = ['hour', 'dayofweek', 'month', 'quarter', 'is_weekend',
+                 'lag_1', 'lag_24', 'lag_48', 'lag_168',
+                 'rolling_mean_24', 'rolling_std_24', 'rolling_mean_168']
+    hist = train['energy'].copy()
+    preds = []
+    for ts in test.index:
+        row = {
+            'hour': ts.hour, 'dayofweek': ts.dayofweek, 'month': ts.month,
+            'quarter': ts.quarter, 'is_weekend': int(ts.dayofweek >= 5),
+            'lag_1': hist.iloc[-1], 'lag_24': hist.iloc[-24],
+            'lag_48': hist.iloc[-48], 'lag_168': hist.iloc[-168],
+            'rolling_mean_24':  hist.iloc[-24:].mean(),
+            'rolling_std_24':   hist.iloc[-24:].std(),
+            'rolling_mean_168': hist.iloc[-168:].mean(),
+        }
+        yhat = float(model.predict(pd.DataFrame([row])[feat_cols])[0])
+        preds.append(yhat)
+        hist.loc[ts] = yhat
+    return np.array(preds)
 
 # ── UI ────────────────────────────────────────────────────────────────────────
 st.set_page_config(page_title='Energy Forecast', layout='wide')
 st.title('Energy Consumption Forecasting')
-st.caption('AEP hourly dataset — comparison of Prophet, XGBoost, LSTM, and PatchTST')
+st.caption('AEP hourly dataset — autoregressive multi-step evaluation (single 672 h rollout, no re-anchoring on real data)')
 
 with st.sidebar:
     st.header('Settings')
