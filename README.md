@@ -1,8 +1,12 @@
 # Energy Consumption Forecasting
 
 Hourly electricity demand forecasting on the AEP dataset (~121k hours, 2004–2018).
-Compares four approaches — from classical decomposition to a Transformer — using a
-fully **autoregressive 672-hour rollout** evaluation and an interactive Streamlit dashboard.
+Compares five approaches — from classical decomposition to a Transformer and a zero-shot
+foundation model — using a fully **autoregressive 672-hour rollout** evaluation and an
+interactive Streamlit dashboard.
+
+TimesFM 3.0 is used zero-shot; its weights are under the TimesFM Non-Commercial License v1.0
+(code Apache-2.0), so treat it as a portfolio comparison, not a production option.
 
 ## Results
 
@@ -11,10 +15,14 @@ each model predicts one step ahead using only its own prior predictions, no re-a
 
 | Model | MAE (MW) | MAPE |
 |-------|----------|------|
+| **TimesFM 3.0 zero-shot** | **481.81** | **3.09%** |
 | Prophet | 1535.93 | 10.33% |
-| **XGBoost + lag features** | **983.25** | **6.40%** |
+| XGBoost + lag features | 983.25 | 6.40% |
 | LSTM + cyclic + scheduled sampling | 2154.65 | 14.02% |
 | PatchTST | 2399.23 | 15.95% |
+
+XGBoost wins among the trained-from-scratch models, but zero-shot TimesFM wins outright,
+without seeing a single hour of this series during training. See `timesfm/README.md`.
 
 <details>
 <summary>Teacher-forced reference numbers (one-step-ahead, non-production)</summary>
@@ -24,6 +32,7 @@ each model predicts one step ahead using only its own prior predictions, no re-a
 | Prophet | 1535.93 | 10.33% |
 | XGBoost | 133.58 | 0.85% |
 | LSTM | 94.35 | 0.61% |
+| TimesFM 3.0 zero-shot | 94.03 | 0.61% |
 | PatchTST | 141.22 | 0.94% |
 
 Teacher-forced evaluation uses the real energy history at every step — it measures
@@ -53,6 +62,11 @@ Trained with **scheduled sampling** (ss_prob 0 → 0.5 over 40 epochs) to reduce
 **PatchTST** — Transformer encoder on overlapping patches (patch_len=16, stride=8 → 20 tokens,
 ~419k params). Pre-LayerNorm, learnable positional embeddings.
 Reduces attention complexity from O(L²) to O(P²) — 70× fewer ops vs raw attention at L=168.
+
+**TimesFM 3.0** — pretrained 0.3B decoder-only patched transformer from Google Research, used
+zero-shot (no training on this series). One forward call over a 2048 h context produces the
+full 672 h horizon directly, with 9 output quantiles per step. Weights are under the TimesFM
+Non-Commercial License v1.0. See `timesfm/README.md` for the full write-up.
 
 ## Discussion
 
@@ -91,6 +105,16 @@ The most recent hour is merged with the preceding 15; the model must reconstruct
 recency from a coarser representation. Echoes **Zeng et al. 2022** (*Are Transformers
 Effective for Time Series Forecasting?*).
 
+### Foundation model vs trained-from-scratch
+
+TimesFM has no exposure bias by construction: it outputs the whole 672 h horizon from one
+forward call, so there is no self-fed lag to drift on, unlike XGBoost's rollout or the LSTM's
+hidden state. On teacher-forced 1-step it ties the LSTM (94.03 vs 94.35 MW), so the pretraining
+already captures this series' short-term autocorrelation without seeing it during training. The
+context-length ablation finds a sweet spot around 2-4k hours: shorter contexts miss a full
+weekly/seasonal picture, longer ones start mixing in other seasons. Caveat: these numbers come
+from a single 4-week window in summer 2018, not a rolling-origin backtest.
+
 ### Computational complexity
 
 | Model | Time | Space | Parallelisable |
@@ -98,6 +122,7 @@ Effective for Time Series Forecasting?*).
 | LSTM | O(L · d²) | O(L · d) | ❌ Sequential |
 | Transformer (raw) | O(L² · d) | O(L²) | ✅ Parallel |
 | PatchTST | O(P² · d) | O(P²) | ✅ Parallel |
+| TimesFM 3.0 (zero-shot) | O(P² · d), no training | O(P²) | ✅ Parallel, 672 h in ~1 s (RTX 4070 laptop) |
 
 L = sequence length, d = hidden size, P = number of patches (P ≪ L).
 
@@ -124,6 +149,7 @@ patchtst_forecaster.pt     # PatchTST weights
 xgb_forecaster.pkl         # XGBoost model
 energy_scaler.pkl          # StandardScaler for the energy column
 AEP_hourly.csv             # raw data (download from Kaggle, not in repo)
+timesfm/                   # zero-shot TimesFM 3.0 baseline (see timesfm/README.md)
 ```
 
 ## Dataset
@@ -138,7 +164,7 @@ Place it in the project root before running the notebook.
 conda create -n torch_env python=3.11
 conda activate torch_env
 pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu118
-pip install numpy pandas scikit-learn xgboost prophet matplotlib tqdm joblib streamlit
+pip install numpy pandas scikit-learn xgboost prophet matplotlib tqdm joblib streamlit "timesfm[torch]"
 ```
 
 ## Run
