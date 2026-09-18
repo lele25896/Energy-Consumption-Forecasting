@@ -41,6 +41,6 @@ on real data. Each prediction is fed back as input for the next step.
 Valid both for XGBoost (lag features) and for LSTM/PatchTST (168h window).
 
 ## References
-- Full deep-dive (9 sections, weak spots): `..\Colloqui\Knowledge\energy-consumption-forecasting.md`
+- Full deep-dive (9 sections, weak spots): `..\Colloqui\Knowledge\Project\energy-forecasting-deep.md`
 - Obsidian entity: `brain\wiki\entities\projects\energy-forecasting.md`
 - TimesFM phase 1/2 write-ups: `timesfm\reports\`
