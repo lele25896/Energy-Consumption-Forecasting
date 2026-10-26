@@ -55,7 +55,7 @@ rolling statistics, and calendar features. Early stopping on an inner validation
 
 ![XGBoost feature importance](feature_importance.png)
 
-**LSTM** — two-layer LSTM (hidden=64, ~80k params) with 8 input features: scaled energy +
+**LSTM** — two-layer LSTM (hidden=64, ~52k params) with 8 input features: scaled energy +
 cyclic sin/cos encodings of hour, day-of-week, and month + is_weekend flag.
 Trained with **scheduled sampling** (ss_prob 0 → 0.5 over 40 epochs) to reduce exposure bias.
 
