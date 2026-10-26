@@ -9,3 +9,7 @@
 __pycache__/
 *.pyc
 .env
+
+# Local Claude Code context (not for the public repo)
+CLAUDE.md
+.claude/
